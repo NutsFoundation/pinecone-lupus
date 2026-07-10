@@ -12,7 +12,7 @@ const (
 	defaultTimeBits   = 28
 	defaultWorkerBits = 22
 	defaultSeqBits    = 13
-	defaultEpochStr   = "2024-10-01"
+	defaultEpochStr   = "2026-07-01"
 )
 
 type DefaultGuid64Allocator struct {
