@@ -13,6 +13,7 @@ type GenericServiceLodestone struct {
 	serviceIdentifier string
 	declaration       *servicearch.ServiceDeclaration
 	legionary         servicearch.CollectiveServiceLegionary
+	prepare           func(context.Context) error
 }
 
 var _ servicearch.ServiceLodestone = (*GenericServiceLodestone)(nil)
@@ -64,6 +65,13 @@ func (l *GenericServiceLodestone) SetLegionary(legionary servicearch.CollectiveS
 	l.legionary = legionary
 }
 
+func (l *GenericServiceLodestone) SetPrepare(prepare func(context.Context) error) {
+	if l == nil {
+		return
+	}
+	l.prepare = prepare
+}
+
 func (l *GenericServiceLodestone) ServiceClient() servicearch.ServiceClient {
 	if l == nil {
 		return nil
@@ -86,7 +94,15 @@ func (l *GenericServiceLodestone) Declaration() *servicearch.ServiceDeclaration 
 }
 
 func (l *GenericServiceLodestone) Start(ctx context.Context) error {
-	if l == nil || l.legionary == nil {
+	if l == nil {
+		return nil
+	}
+	if l.prepare != nil {
+		if err := l.prepare(ctx); err != nil {
+			return err
+		}
+	}
+	if l.legionary == nil {
 		return nil
 	}
 	if err := l.legionary.StartService(ctx); err != nil {
@@ -97,8 +113,16 @@ func (l *GenericServiceLodestone) Start(ctx context.Context) error {
 }
 
 func (l *GenericServiceLodestone) Stop(ctx context.Context, reason string) error {
-	if l == nil || l.legionary == nil {
+	if l == nil {
 		return nil
 	}
-	return l.legionary.Deregister(ctx, reason)
+	if l.legionary != nil {
+		err := l.legionary.Deregister(ctx, reason)
+		l.legionary.TerminateService(ctx, reason)
+		return err
+	}
+	if l.serviceClient != nil {
+		return l.serviceClient.TerminateService(ctx)
+	}
+	return nil
 }

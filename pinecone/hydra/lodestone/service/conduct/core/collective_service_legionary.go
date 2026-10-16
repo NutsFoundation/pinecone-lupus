@@ -3,7 +3,6 @@ package core
 import (
 	"context"
 	"errors"
-	"log"
 	"sync"
 	"time"
 
@@ -24,6 +23,7 @@ type CollectiveServiceLegionary struct {
 	serviceGUID  string
 	instanceGUID string
 	state        servicearch.ServiceLegionaryState
+	logger       servicearch.Logger
 
 	rejoinMu        sync.Mutex
 	rejoinRequested bool
@@ -41,14 +41,19 @@ func NewCollectiveServiceLegionary(
 	name string,
 	serviceClient servicearch.ServiceClient,
 	joinRequest servicearch.ServiceJoinRequest,
+	loggers ...servicearch.Logger,
 ) *CollectiveServiceLegionary {
-	return &CollectiveServiceLegionary{
+	legionary := &CollectiveServiceLegionary{
 		name:          name,
 		serviceClient: serviceClient,
 		joinRequest:   joinRequest,
 		serviceGUID:   joinRequest.ServiceGUID,
 		state:         servicearch.ServiceLegionaryStateNew,
 	}
+	if len(loggers) > 0 {
+		legionary.logger = loggers[0]
+	}
+	return legionary
 }
 
 func (l *CollectiveServiceLegionary) Name() string {
@@ -142,7 +147,7 @@ func (l *CollectiveServiceLegionary) JoinRegiment(ctx context.Context) (*service
 		l.instanceGUID = response.InstanceGUID
 	}
 	l.state = servicearch.ServiceLegionaryStateOnline
-	log.Printf("[LodestoneServiceLegionary] [JoinRegiment] (Name:`%s`, ClientId:`%d`, Service:`%s`, Instance:`%s`) <Done>", l.name, l.ClientID(), l.serviceGUID, l.instanceGUID)
+	l.logInfof("[LodestoneServiceLegionary] [JoinRegiment] (Name:`%s`, ClientId:`%d`, Service:`%s`, Instance:`%s`) <Done>", l.name, l.ClientID(), l.serviceGUID, l.instanceGUID)
 	return response, nil
 }
 
@@ -210,11 +215,23 @@ func (l *CollectiveServiceLegionary) rejoinRegimentOnce(reason string) bool {
 	l.state = servicearch.ServiceLegionaryStateRejoining
 	if _, err := l.JoinRegiment(context.Background()); err != nil {
 		l.state = servicearch.ServiceLegionaryStateOffline
-		log.Printf("[LodestoneServiceLegionary] [RejoinRegiment] (Reason:`%s`, Name:`%s`, ClientId:`%d`) <Failure> %v", reason, l.name, l.ClientID(), err)
+		l.logErrorf("[LodestoneServiceLegionary] [RejoinRegiment] (Reason:`%s`, Name:`%s`, ClientId:`%d`) <Failure> %v", reason, l.name, l.ClientID(), err)
 		return false
 	}
-	log.Printf("[LodestoneServiceLegionary] [RejoinRegiment] (Reason:`%s`, Name:`%s`, ClientId:`%d`) <Done>", reason, l.name, l.ClientID())
+	l.logInfof("[LodestoneServiceLegionary] [RejoinRegiment] (Reason:`%s`, Name:`%s`, ClientId:`%d`) <Done>", reason, l.name, l.ClientID())
 	return true
+}
+
+func (l *CollectiveServiceLegionary) logInfof(format string, args ...any) {
+	if l != nil && l.logger != nil {
+		l.logger.Infof(format, args...)
+	}
+}
+
+func (l *CollectiveServiceLegionary) logErrorf(format string, args ...any) {
+	if l != nil && l.logger != nil {
+		l.logger.Errorf(format, args...)
+	}
 }
 
 func rejoinRetryDelay(failures int) time.Duration {
@@ -259,7 +276,7 @@ func (l *CollectiveServiceLegionary) TerminateService(ctx context.Context, reaso
 	l.rejoinMu.Unlock()
 
 	if err := l.Deregister(ctx, reason); err != nil {
-		log.Printf("[LodestoneServiceLegionary] [Terminate] (Name:`%s`, ClientId:`%d`) <DeregisterFailure> %v", l.name, l.ClientID(), err)
+		l.logErrorf("[LodestoneServiceLegionary] [Terminate] (Name:`%s`, ClientId:`%d`) <DeregisterFailure> %v", l.name, l.ClientID(), err)
 	}
 	if l.stateSynchronizedHandler != nil && l.serviceClient != nil {
 		l.serviceClient.DeregisterStateSynchronizedHandler(l.stateSynchronizedHandler)
@@ -292,7 +309,7 @@ func (l *CollectiveServiceLegionary) registerManipulationHandler() {
 	}
 	l.manipulationHandler = func(instruction servicearch.ServiceShutdownInstruction) {
 		if instruction.InstanceGUID != "" && l.instanceGUID != "" && instruction.InstanceGUID != l.instanceGUID {
-			log.Printf("[LodestoneServiceLegionary] [PassiveShutdown] (Name:`%s`, ClientId:`%d`, CurrentInstance:`%s`, RequestedInstance:`%s`) <Ignored>", l.name, l.ClientID(), l.instanceGUID, instruction.InstanceGUID)
+			l.logInfof("[LodestoneServiceLegionary] [PassiveShutdown] (Name:`%s`, ClientId:`%d`, CurrentInstance:`%s`, RequestedInstance:`%s`) <Ignored>", l.name, l.ClientID(), l.instanceGUID, instruction.InstanceGUID)
 			return
 		}
 		go l.TerminateService(context.Background(), instruction.Reason)

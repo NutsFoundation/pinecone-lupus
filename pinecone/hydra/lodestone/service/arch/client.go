@@ -12,6 +12,8 @@ type ServiceClient interface {
 	DeregisterStateSynchronizedHandler(handler ServiceClientStateSynchronizedHandler)
 	RegisterManipulationHandler(handler ServiceClientManipulationHandler)
 	DeregisterManipulationHandler(handler ServiceClientManipulationHandler)
+	RegisterConnectionStateHandler(handler ServiceClientConnectionStateHandler)
+	DeregisterConnectionStateHandler(handler ServiceClientConnectionStateHandler)
 }
 
 type ServiceLifecyclePort interface {
@@ -28,3 +30,5 @@ type ServiceMetaPort interface {
 type ServiceClientStateSynchronizedHandler func(reason string)
 
 type ServiceClientManipulationHandler func(instruction ServiceShutdownInstruction)
+
+type ServiceClientConnectionStateHandler func(state string, reason string)

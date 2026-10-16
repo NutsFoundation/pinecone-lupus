@@ -33,26 +33,30 @@ type ServiceLodestoneConfig struct {
 	Lifecycle           LifecyclePolicy
 	Name                string
 	MessageNode         string
+	Logger              Logger
 	RPC                 RPCConfig
 	ServiceIdentifier   string
 	RuntimeNodeID       string
 	RuntimeNodeAlias    string
 	RuntimeNodeMetadata any
+	RuntimeNodeNetwork  *NetworkMetadata
+	Endpoint            ServiceEndpoint
 	Declaration         ServiceDeclaration
 }
 
 type RPCConfig struct {
-	Type                     string
-	Host                     string
-	Port                     int
-	Insecure                 bool
-	ClientID                 *int64
-	ClientGuid               string
-	AutoReconnect            *bool
-	KeepAliveTimeSec         int64
-	KeepAliveTimeoutSec      int64
-	EnableHeartbeat          bool
-	HeartbeatIntervalMillis  int64
-	CommandTimeoutMillis     int64
-	ControlSyncTimeoutMillis int64
+	Type                        string
+	Host                        string
+	Port                        int
+	Insecure                    bool
+	ClientID                    *int64
+	ClientGuid                  string
+	AutoReconnect               *bool
+	KeepAliveTimeSec            int64
+	KeepAliveTimeoutSec         int64
+	EnableHeartbeat             bool
+	HeartbeatIntervalMillis     int64
+	CommandTimeoutMillis        int64
+	ControlSyncTimeoutMillis    int64
+	InitialConnectTimeoutMillis int64
 }

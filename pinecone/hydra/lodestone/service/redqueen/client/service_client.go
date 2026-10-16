@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"sync"
 	"time"
 
@@ -38,6 +37,7 @@ type ServiceClient struct {
 	mu                   sync.Mutex
 	stateHandlers        []servicearch.ServiceClientStateSynchronizedHandler
 	manipulationHandlers []servicearch.ServiceClientManipulationHandler
+	connectionHandlers   []servicearch.ServiceClientConnectionStateHandler
 	heartbeatCancel      context.CancelFunc
 	reconnectRequested   bool
 	reconnecting         bool
@@ -75,10 +75,15 @@ func (c *ServiceClient) StartService(ctx context.Context) error {
 	c.mu.Lock()
 	c.terminated = false
 	c.mu.Unlock()
+	c.notifyConnectionState("CONNECTING", "Startup")
+	c.logInfof("[RedQueenServiceClient] [Start] (Address:`%s`, ClientId:`%d`) <Start>", c.config.Address, c.ClientID())
 	if err := c.synchronizeControlState(ctx, "Startup"); err != nil {
+		c.notifyConnectionState("OFFLINE", err.Error())
+		c.logErrorf("[RedQueenServiceClient] [Start] (Address:`%s`, ClientId:`%d`) <Failure> %v", c.config.Address, c.ClientID(), err)
 		return err
 	}
 	c.startHeartbeat()
+	c.logInfof("[RedQueenServiceClient] [Start] (Address:`%s`, ClientId:`%d`) <Done>", c.config.Address, c.ClientID())
 	return nil
 }
 
@@ -103,6 +108,7 @@ func (c *ServiceClient) TerminateService(ctx context.Context) error {
 	c.conn = nil
 	c.ready = false
 	c.sessionGUID = ""
+	c.connectionHandlers = nil
 	c.mu.Unlock()
 
 	if stream != nil {
@@ -245,6 +251,24 @@ func (c *ServiceClient) DeregisterManipulationHandler(handler servicearch.Servic
 	c.manipulationHandlers = nil
 }
 
+func (c *ServiceClient) RegisterConnectionStateHandler(handler servicearch.ServiceClientConnectionStateHandler) {
+	if c == nil || handler == nil {
+		return
+	}
+	c.mu.Lock()
+	c.connectionHandlers = append(c.connectionHandlers, handler)
+	c.mu.Unlock()
+}
+
+func (c *ServiceClient) DeregisterConnectionStateHandler(handler servicearch.ServiceClientConnectionStateHandler) {
+	if c == nil || handler == nil {
+		return
+	}
+	c.mu.Lock()
+	c.connectionHandlers = nil
+	c.mu.Unlock()
+}
+
 func (c *ServiceClient) synchronizeControlState(ctx context.Context, reason string) error {
 	syncCtx, cancel := context.WithTimeout(ctx, c.config.ControlSyncTimeout)
 	defer cancel()
@@ -269,7 +293,8 @@ func (c *ServiceClient) synchronizeControlState(ctx context.Context, reason stri
 	c.ready = true
 	handlers := append([]servicearch.ServiceClientStateSynchronizedHandler{}, c.stateHandlers...)
 	c.mu.Unlock()
-	log.Printf("[RedQueenServiceClient] [ControlReady] (ClientId:`%d`, Session:`%s`, Reason:`%s`) <Done>", c.ClientID(), c.sessionGUID, reason)
+	c.logInfof("[RedQueenServiceClient] [ControlReady] (ClientId:`%d`, Session:`%s`, Reason:`%s`) <Done>", c.ClientID(), c.sessionGUID, reason)
+	c.notifyConnectionState("ONLINE", reason)
 	for _, handler := range handlers {
 		handler(reason)
 	}
@@ -325,8 +350,16 @@ func (c *ServiceClient) ensureMetaClient(ctx context.Context) error {
 	if c.config.Address == "" {
 		return errors.New("redqueen gRPC address is required")
 	}
-	conn, err := grpc.DialContext(ctx, c.config.Address, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	dialCtx := ctx
+	cancel := func() {}
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		dialCtx, cancel = context.WithTimeout(ctx, c.config.InitialConnectTimeout)
+	}
+	defer cancel()
+	c.logInfof("[RedQueenServiceClient] [Connect] (Address:`%s`, Timeout:`%s`, ClientId:`%d`) <Start>", c.config.Address, c.config.InitialConnectTimeout, c.ClientID())
+	conn, err := grpc.DialContext(dialCtx, c.config.Address, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
 	if err != nil {
+		c.logErrorf("[RedQueenServiceClient] [Connect] (Address:`%s`, ClientId:`%d`) <Failure> %v", c.config.Address, c.ClientID(), err)
 		return err
 	}
 	c.mu.Lock()
@@ -334,6 +367,7 @@ func (c *ServiceClient) ensureMetaClient(ctx context.Context) error {
 	c.controlClient = lifecyclepb.NewServiceControlClient(conn)
 	c.metaClient = metapb.NewServiceMetaClient(conn)
 	c.mu.Unlock()
+	c.logInfof("[RedQueenServiceClient] [Connect] (Address:`%s`, ClientId:`%d`) <Done>", c.config.Address, c.ClientID())
 	return nil
 }
 
@@ -411,10 +445,12 @@ func (c *ServiceClient) handleStreamBroken(err error) {
 		return
 	}
 	c.mu.Unlock()
-	log.Printf("[RedQueenServiceClient] [StreamBroken] (ClientId:`%d`, Reason:`%s`) <ReconnectRequested>", c.ClientID(), err)
+	c.logErrorf("[RedQueenServiceClient] [StreamBroken] (ClientId:`%d`, Reason:`%s`) <Disconnected>", c.ClientID(), err)
+	c.notifyConnectionState("OFFLINE", err.Error())
 	c.markDisconnected()
 	c.waiter.completeAllExceptionally(err)
-	if c.config.AutoSynchronizeOnError {
+	if c.config.AutoReconnect {
+		c.logInfof("[RedQueenServiceClient] [StreamBroken] (ClientId:`%d`) <ReconnectRequested>", c.ClientID())
 		c.requestControlReconnect("StreamError")
 	}
 }
@@ -480,7 +516,7 @@ func (c *ServiceClient) runControlReconnectLoop() {
 				}
 				failures++
 				delay := controlReconnectDelay(failures)
-				log.Printf("[RedQueenServiceClient] [ControlReconnect] (ClientId:`%d`, Attempt:`%d`, Delay:`%s`) <Failure> %v", c.ClientID(), failures, delay, err)
+				c.logErrorf("[RedQueenServiceClient] [ControlReconnect] (ClientId:`%d`, Attempt:`%d`, Delay:`%s`) <Failure> %v", c.ClientID(), failures, delay, err)
 				time.Sleep(delay)
 				if c.isTerminated() {
 					return
@@ -490,7 +526,7 @@ func (c *ServiceClient) runControlReconnectLoop() {
 				}
 				continue
 			}
-			log.Printf("[RedQueenServiceClient] [ControlReconnect] (ClientId:`%d`, Reason:`%s`) <Done>", c.ClientID(), reason)
+			c.logInfof("[RedQueenServiceClient] [ControlReconnect] (ClientId:`%d`, Reason:`%s`) <Done>", c.ClientID(), reason)
 			failures = 0
 			break
 		}
@@ -559,8 +595,32 @@ func (c *ServiceClient) sendHeartbeatQuietly() {
 		return
 	}
 	if err := stream.Send(c.factory.heartbeatFrame(c.ClientID(), sessionGUID, instanceGUID)); err != nil {
-		log.Printf("[RedQueenServiceClient] [Heartbeat] (ClientId:`%d`) <Failure> %v", c.ClientID(), err)
+		c.logErrorf("[RedQueenServiceClient] [Heartbeat] (ClientId:`%d`) <Failure> %v", c.ClientID(), err)
 		c.handleStreamBroken(err)
+	}
+}
+
+func (c *ServiceClient) logInfof(format string, args ...any) {
+	if c != nil && c.config.Logger != nil {
+		c.config.Logger.Infof(format, args...)
+	}
+}
+
+func (c *ServiceClient) logErrorf(format string, args ...any) {
+	if c != nil && c.config.Logger != nil {
+		c.config.Logger.Errorf(format, args...)
+	}
+}
+
+func (c *ServiceClient) notifyConnectionState(state string, reason string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	handlers := append([]servicearch.ServiceClientConnectionStateHandler{}, c.connectionHandlers...)
+	c.mu.Unlock()
+	for _, handler := range handlers {
+		handler(state, reason)
 	}
 }
 

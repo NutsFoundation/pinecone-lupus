@@ -57,32 +57,19 @@ func (p *RedQueenServiceProvider) Create(ctx context.Context, config servicearch
 	}
 	clientName := resolveClientName(config)
 	client := redclient.NewServiceClient(redclient.Config{
-		Address:                rpcAddress(config.RPC),
-		ClientID:               clientID,
-		ClientName:             clientName,
-		ClientGUID:             config.RPC.ClientGuid,
-		CommandTimeout:         millis(config.RPC.CommandTimeoutMillis),
-		ControlSyncTimeout:     millis(config.RPC.ControlSyncTimeoutMillis),
-		HeartbeatInterval:      millis(config.RPC.HeartbeatIntervalMillis),
-		EnableHeartbeat:        config.RPC.EnableHeartbeat,
-		AutoSynchronizeOnError: true,
+		Address:               rpcAddress(config.RPC),
+		ClientID:              clientID,
+		ClientName:            clientName,
+		ClientGUID:            config.RPC.ClientGuid,
+		CommandTimeout:        millis(config.RPC.CommandTimeoutMillis),
+		ControlSyncTimeout:    millis(config.RPC.ControlSyncTimeoutMillis),
+		HeartbeatInterval:     millis(config.RPC.HeartbeatIntervalMillis),
+		EnableHeartbeat:       config.RPC.EnableHeartbeat,
+		AutoReconnect:         boolOrDefault(config.RPC.AutoReconnect, true),
+		InitialConnectTimeout: millis(config.RPC.InitialConnectTimeoutMillis),
+		Logger:                config.Logger,
 	}, p.allocator)
 
-	serviceMeta, err := p.resolveServiceMeta(ctx, client, config)
-	if err != nil {
-		return nil, err
-	}
-
-	joinRequest := servicearch.ServiceJoinRequest{
-		ServiceGUID: serviceMeta.GUID,
-	}
-	runtimeNodeID := strings.TrimSpace(config.RuntimeNodeID)
-	if runtimeNodeID != "" {
-		joinRequest.RuntimeNodeID = runtimeNodeID
-		joinRequest.RuntimeNodeAlias = config.RuntimeNodeAlias
-		joinRequest.RuntimeNodeMetadataJSON = runtimeNodeMetadataJSON(config.RuntimeNodeMetadata)
-	}
-	legionary := conductcore.NewCollectiveServiceLegionary(config.Name, client, joinRequest)
 	declaration := config.Declaration
 	lodestone := servicecore.NewGenericServiceLodestone(
 		config.Name,
@@ -91,7 +78,37 @@ func (p *RedQueenServiceProvider) Create(ctx context.Context, config servicearch
 		config.ServiceIdentifier,
 		&declaration,
 	)
-	lodestone.SetLegionary(legionary)
+	lodestone.SetPrepare(func(startCtx context.Context) error {
+		connectCtx, cancel := initialConnectContext(startCtx, config.RPC.InitialConnectTimeoutMillis)
+		defer cancel()
+		logInfof(config.Logger, "[RedQueenServiceProvider] [ResolveServiceMeta] (Service:`%s`) <Start>", config.ServiceIdentifier)
+		serviceMeta, err := p.resolveServiceMeta(connectCtx, client, config)
+		if err != nil {
+			logErrorf(config.Logger, "[RedQueenServiceProvider] [ResolveServiceMeta] (Service:`%s`) <Failure> %v", config.ServiceIdentifier, err)
+			return err
+		}
+		logInfof(config.Logger, "[RedQueenServiceProvider] [ResolveServiceMeta] (Service:`%s`, Guid:`%s`) <Done>", config.ServiceIdentifier, serviceMeta.GUID)
+		joinRequest := servicearch.ServiceJoinRequest{
+			ServiceGUID: serviceMeta.GUID,
+			Endpoint:    config.Endpoint,
+		}
+		runtimeNodeID := strings.TrimSpace(config.RuntimeNodeID)
+		if runtimeNodeID != "" {
+			joinRequest.RuntimeNodeID = runtimeNodeID
+			joinRequest.RuntimeNodeAlias = config.RuntimeNodeAlias
+			metadata := config.RuntimeNodeMetadata
+			if config.RuntimeNodeNetwork != nil {
+				merged, metadataErr := servicearch.MergeRuntimeNodeMetadata(metadata, config.RuntimeNodeNetwork)
+				if metadataErr != nil {
+					return metadataErr
+				}
+				metadata = merged
+			}
+			joinRequest.RuntimeNodeMetadataJSON = runtimeNodeMetadataJSON(metadata)
+		}
+		lodestone.SetLegionary(conductcore.NewCollectiveServiceLegionary(config.Name, client, joinRequest, config.Logger))
+		return nil
+	})
 	return lodestone, nil
 }
 
@@ -186,6 +203,32 @@ func millis(value int64) time.Duration {
 		return 0
 	}
 	return time.Duration(value) * time.Millisecond
+}
+
+func boolOrDefault(value *bool, fallback bool) bool {
+	if value == nil {
+		return fallback
+	}
+	return *value
+}
+
+func logInfof(logger servicearch.Logger, format string, args ...any) {
+	if logger != nil {
+		logger.Infof(format, args...)
+	}
+}
+
+func logErrorf(logger servicearch.Logger, format string, args ...any) {
+	if logger != nil {
+		logger.Errorf(format, args...)
+	}
+}
+
+func initialConnectContext(ctx context.Context, timeoutMillis int64) (context.Context, context.CancelFunc) {
+	if timeoutMillis <= 0 {
+		timeoutMillis = 5000
+	}
+	return context.WithTimeout(ctx, time.Duration(timeoutMillis)*time.Millisecond)
 }
 
 func rpcAddress(config servicearch.RPCConfig) string {
