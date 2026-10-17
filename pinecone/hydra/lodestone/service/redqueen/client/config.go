@@ -10,6 +10,8 @@ const defaultTransportVersion = "redqueen-grpc-service-control/1.0"
 
 type Config struct {
 	Address               string
+	Insecure              bool
+	TLS                   servicearch.RPCTLSConfig
 	ClientID              int64
 	ClientName            string
 	ClientGUID            string

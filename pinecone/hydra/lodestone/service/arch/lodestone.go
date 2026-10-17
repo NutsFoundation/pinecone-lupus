@@ -41,6 +41,9 @@ type ServiceLodestoneConfig struct {
 	RuntimeNodeMetadata any
 	RuntimeNodeNetwork  *NetworkMetadata
 	Endpoint            ServiceEndpoint
+	AdvertisedEndpoint  ServiceEndpoint
+	Version             string
+	MetadataJSON        string
 	Declaration         ServiceDeclaration
 }
 
@@ -49,6 +52,7 @@ type RPCConfig struct {
 	Host                        string
 	Port                        int
 	Insecure                    bool
+	TLS                         RPCTLSConfig
 	ClientID                    *int64
 	ClientGuid                  string
 	AutoReconnect               *bool
@@ -59,4 +63,12 @@ type RPCConfig struct {
 	CommandTimeoutMillis        int64
 	ControlSyncTimeoutMillis    int64
 	InitialConnectTimeoutMillis int64
+}
+
+type RPCTLSConfig struct {
+	Enable          bool
+	ServerName      string
+	CAPath          string
+	CertificatePath string
+	PrivateKeyPath  string
 }

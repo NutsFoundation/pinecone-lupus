@@ -51,6 +51,10 @@ func (p *RedQueenServiceProvider) Create(ctx context.Context, config servicearch
 	if strings.TrimSpace(config.ServiceIdentifier) == "" {
 		return nil, errors.New("Lodestone.Service.serviceIdentifier is required")
 	}
+	config, err := servicearch.NormalizeServiceConfig(config)
+	if err != nil {
+		return nil, err
+	}
 	clientID, err := servicecore.ResolveClientID(config.RPC.ClientID, p.allocator64)
 	if err != nil {
 		return nil, err
@@ -58,6 +62,8 @@ func (p *RedQueenServiceProvider) Create(ctx context.Context, config servicearch
 	clientName := resolveClientName(config)
 	client := redclient.NewServiceClient(redclient.Config{
 		Address:               rpcAddress(config.RPC),
+		Insecure:              config.RPC.Insecure,
+		TLS:                   config.RPC.TLS,
 		ClientID:              clientID,
 		ClientName:            clientName,
 		ClientGUID:            config.RPC.ClientGuid,
@@ -88,28 +94,38 @@ func (p *RedQueenServiceProvider) Create(ctx context.Context, config servicearch
 			return err
 		}
 		logInfof(config.Logger, "[RedQueenServiceProvider] [ResolveServiceMeta] (Service:`%s`, Guid:`%s`) <Done>", config.ServiceIdentifier, serviceMeta.GUID)
-		joinRequest := servicearch.ServiceJoinRequest{
-			ServiceGUID: serviceMeta.GUID,
-			Endpoint:    config.Endpoint,
-		}
-		runtimeNodeID := strings.TrimSpace(config.RuntimeNodeID)
-		if runtimeNodeID != "" {
-			joinRequest.RuntimeNodeID = runtimeNodeID
-			joinRequest.RuntimeNodeAlias = config.RuntimeNodeAlias
-			metadata := config.RuntimeNodeMetadata
-			if config.RuntimeNodeNetwork != nil {
-				merged, metadataErr := servicearch.MergeRuntimeNodeMetadata(metadata, config.RuntimeNodeNetwork)
-				if metadataErr != nil {
-					return metadataErr
-				}
-				metadata = merged
-			}
-			joinRequest.RuntimeNodeMetadataJSON = runtimeNodeMetadataJSON(metadata)
+		joinRequest, err := serviceJoinRequest(config, serviceMeta.GUID)
+		if err != nil {
+			return err
 		}
 		lodestone.SetLegionary(conductcore.NewCollectiveServiceLegionary(config.Name, client, joinRequest, config.Logger))
 		return nil
 	})
 	return lodestone, nil
+}
+
+func serviceJoinRequest(config servicearch.ServiceLodestoneConfig, serviceGUID string) (servicearch.ServiceJoinRequest, error) {
+	request := servicearch.ServiceJoinRequest{
+		ServiceGUID:  serviceGUID,
+		Endpoint:     config.Endpoint,
+		Version:      config.Version,
+		MetadataJSON: config.MetadataJSON,
+	}
+	runtimeNodeID := strings.TrimSpace(config.RuntimeNodeID)
+	if runtimeNodeID != "" {
+		request.RuntimeNodeID = runtimeNodeID
+		request.RuntimeNodeAlias = config.RuntimeNodeAlias
+		metadata := config.RuntimeNodeMetadata
+		if config.RuntimeNodeNetwork != nil {
+			merged, err := servicearch.MergeRuntimeNodeMetadata(metadata, config.RuntimeNodeNetwork)
+			if err != nil {
+				return servicearch.ServiceJoinRequest{}, err
+			}
+			metadata = merged
+		}
+		request.RuntimeNodeMetadataJSON = runtimeNodeMetadataJSON(metadata)
+	}
+	return request, nil
 }
 
 func (p *RedQueenServiceProvider) resolveServiceMeta(ctx context.Context, client servicearch.ServiceClient, config servicearch.ServiceLodestoneConfig) (*servicearch.ServiceMeta, error) {

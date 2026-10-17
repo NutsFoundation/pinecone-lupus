@@ -12,32 +12,46 @@ type correlationResult struct {
 	err   error
 }
 
+type pendingCorrelation struct {
+	guid   string
+	done   chan struct{}
+	once   sync.Once
+	result correlationResult
+}
+
+func (p *pendingCorrelation) complete(result correlationResult) {
+	p.once.Do(func() {
+		p.result = result
+		close(p.done)
+	})
+}
+
 type correlationWaiter struct {
-	mu      sync.Mutex
-	waiters map[string]chan correlationResult
+	mu          sync.Mutex
+	waiters     map[string]*pendingCorrelation
+	terminalErr error
 }
 
 func newCorrelationWaiter() *correlationWaiter {
-	return &correlationWaiter{waiters: map[string]chan correlationResult{}}
+	return &correlationWaiter{waiters: map[string]*pendingCorrelation{}}
 }
 
-func (w *correlationWaiter) prepare(guid string) {
+func (w *correlationWaiter) prepare(guid string) *pendingCorrelation {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.waiters[guid] = make(chan correlationResult, 1)
+	pending := &pendingCorrelation{guid: guid, done: make(chan struct{})}
+	if w.terminalErr != nil {
+		pending.complete(correlationResult{err: w.terminalErr})
+		return pending
+	}
+	w.waiters[guid] = pending
+	return pending
 }
 
-func (w *correlationWaiter) await(ctx context.Context, guid string) (*lifecyclepb.ServiceControlFrame, error) {
-	w.mu.Lock()
-	ch := w.waiters[guid]
-	w.mu.Unlock()
-	if ch == nil {
-		return nil, nil
-	}
-	defer w.remove(guid)
+func (w *correlationWaiter) await(ctx context.Context, pending *pendingCorrelation) (*lifecyclepb.ServiceControlFrame, error) {
 	select {
-	case result := <-ch:
-		return result.frame, result.err
+	case <-pending.done:
+		return pending.result.frame, pending.result.err
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -45,33 +59,38 @@ func (w *correlationWaiter) await(ctx context.Context, guid string) (*lifecyclep
 
 func (w *correlationWaiter) complete(guid string, frame *lifecyclepb.ServiceControlFrame) {
 	w.mu.Lock()
-	ch := w.waiters[guid]
+	pending := w.waiters[guid]
 	w.mu.Unlock()
-	if ch != nil {
-		ch <- correlationResult{frame: frame}
+	if pending != nil {
+		pending.complete(correlationResult{frame: frame})
 	}
 }
 
 func (w *correlationWaiter) completeExceptionally(guid string, err error) {
 	w.mu.Lock()
-	ch := w.waiters[guid]
+	pending := w.waiters[guid]
 	w.mu.Unlock()
-	if ch != nil {
-		ch <- correlationResult{err: err}
+	if pending != nil {
+		pending.complete(correlationResult{err: err})
 	}
 }
 
 func (w *correlationWaiter) completeAllExceptionally(err error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	for guid, ch := range w.waiters {
-		ch <- correlationResult{err: err}
+	if w.terminalErr == nil {
+		w.terminalErr = err
+	}
+	for guid, pending := range w.waiters {
+		pending.complete(correlationResult{err: err})
 		delete(w.waiters, guid)
 	}
 }
 
-func (w *correlationWaiter) remove(guid string) {
+func (w *correlationWaiter) remove(pending *pendingCorrelation) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	delete(w.waiters, guid)
+	if w.waiters[pending.guid] == pending {
+		delete(w.waiters, pending.guid)
+	}
 }
